@@ -24,7 +24,7 @@ simulate(fpt)
 𝔼(fpt)
 
 # Calculate time-averaged mean square displacement
-𝔼(δ̄²(x; T=100, Δ=0.1))
+𝔼(δ̄²(B; T=100, Δ=0.1))
 ```
 
 ## License

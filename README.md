@@ -6,7 +6,7 @@ English | [简体中文](README-zh.md)
 
 ## Usage Examples
 ```julia
-using DiffusionX.Simulation
+using DiffusionX
 
 # Simulate standard Brownian motion path
 B = Bm()              
@@ -24,7 +24,7 @@ simulate(fpt)
 𝔼(fpt)
 
 # Calculate time-averaged mean square displacement
-𝔼(δ̄²(B; T=100, Δ=0.1))
+𝔼(δ̄²(B, T=100, Δ=0.1))
 ```
 
 ## License

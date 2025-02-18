@@ -6,7 +6,7 @@
 
 ## 使用示例
 ```julia
-using DiffusionX.Simulation
+using DiffusionX
 
 # 模拟标准布朗运动路径
 B = Bm()              
@@ -24,7 +24,7 @@ simulate(fpt)
 𝔼(fpt)
 
 # 计算时间平均均方位移.
-𝔼(δ̄²(B; T=100, Δ=0.1))
+𝔼(δ̄²(B, T=100, Δ=0.1))
 ```
 
 ## 许可证

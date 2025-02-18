@@ -33,7 +33,9 @@ struct Trajectory{SP<:StochasticProcess}
     end
 end
 
-show(io::IO, traj::Trajectory) = print(io, "The trajectory of $(traj.sp) with length $(traj.T)")
+function Base.show(io::IO, traj::Trajectory)
+    print(io, "The trajectory of $(traj.sp) with length $(traj.T)")
+end
 
 @doc raw"""
     `(sp::StochasticProcess)(T)`
@@ -43,9 +45,28 @@ show(io::IO, traj::Trajectory) = print(io, "The trajectory of $(traj.sp) with le
     # Arguments
     - `T`: The length of the trajectory.
 """
-(sp::StochasticProcess)(T) = Trajectory(sp, T)
+function (sp::StochasticProcess)(T)
+    Trajectory(sp, T)
+end
 
-simulate(traj::Trajectory, τ=1e-2) = traj.sp.method(traj.T, τ, args(traj.sp)...)
+simulate_method(sp::SP) where {SP<:StochasticProcess} = nothing
+
+@doc raw"""
+    `simulate(traj::Trajectory, τ=1e-2)`
+
+    The function to simulate the trajectory.
+    
+    **Need the method `simulate_method` for the stochastic process.**
+
+    # Arguments
+    - `traj`: The trajectory.
+    - `τ`: The time step.
+"""
+function simulate(traj::Trajectory, τ=1e-2)
+    method = simulate_method(traj.sp)
+    isnothing(method) && throw(ArgumentError("No simulation method for $(traj.sp)"))
+    method(traj.T, args(traj.sp)...; τ=τ)
+end
 
 @doc raw"""
    `PowerTrajectory(traj::Trajectory, order::Int)`
@@ -70,12 +91,14 @@ end
     - `traj`: The trajectory.
     - `order`: The order of the power trajectory.
 """
-^(traj::Trajectory, order::Int) = PowerTrajectory(traj, order)
+function Base.:^(traj::Trajectory, order::Int)
+    PowerTrajectory(traj, order)
+end
 
 @doc raw"""
-    `moments(traj::Trajectory, N::Int; τ=0.01, order::Int=1)`
+    `moment(traj::Trajectory, N::Int; τ=0.01, order::Int=1)`
 
-    The function to calculate the moments of the trajectory.
+    The function to calculate the moment of the trajectory.
 
     # Arguments
     - `traj`: The trajectory.   
@@ -88,24 +111,36 @@ end
     using DiffusionX
     sp = Bm()
     traj = sp(10)
-    moments(traj, 1000; τ=0.01, order=2)
+    moment(traj, 1000; τ=0.01, order=2)
     ```
 """
-function moments(traj::Trajectory; N::Int=1000, τ=0.01, order::Int=1)
+function moment(traj::Trajectory; N::Int=1000, τ=0.01, order::Int=1)
     moment = zeros(nthreads())
+    method = simulate_method(traj.sp)
+    isnothing(method) && throw(ArgumentError("No simulation method for $(traj.sp)"))
+    T = traj.T
+    vargs = args(traj.sp)
     @threads for _ in 1:N
-        __, x = simulate(traj, τ)
+        __, x = method(T, vargs...; τ=τ)
         @inbounds moment[threadid()] += x[end]^order
     end
     sum(moment) / N
 end
 
+moment(ptraj::PowerTrajectory; N::Int=1_000, τ=0.01) = moment(ptraj.traj; N=N, τ=τ, order=ptraj.order)
+
+𝔼(traj::Trajectory; N::Int=1_000, τ=0.01) = moment(traj; N=N, τ=τ)
+𝔼(ptraj::PowerTrajectory; N::Int=1_000, τ=0.01) = moment(ptraj; N=N, τ=τ)
+
+mean(traj::Trajectory; N::Int=1_000, τ=0.01) = moment(traj; N=N, τ=τ)
+msd(traj::Trajectory; N::Int=1_000, τ=0.01) = moment(traj; N=N, τ=τ, order=2) - moment(traj; N=N, τ=τ)^2
+
 @doc raw"""
-    `Functional`
+    `Functional{SP<:StochasticProcess}`
 
     The abstract type of functionals.
 """
-abstract type Functional end
+abstract type Functional{SP<:StochasticProcess} end
 
 @doc raw"""
     `^(functional::Functional, order::Int)`
@@ -117,44 +152,75 @@ struct FunctionalPower{F<:Functional}
     order::Int
 end
 
+moment(fp::FunctionalPower; N::Int=1_000, τ=0.01) = moment(fp.functional; N=N, τ=τ, order=fp.order)
+
+𝔼(fp::FunctionalPower; N::Int=1_000, τ=0.01) = moment(fp; N=N, τ=τ)
+
+
 @doc raw"""
     `FPT(domain::NTuple{2,Float64}, sp::StochasticProcess)`
 
     The type of first passage time functionals.
 """
-struct FPT <: Functional
+struct FPT{SP<:StochasticProcess} <: Functional{SP}
     domain::NTuple{2,Float64}
-    sp::StochasticProcess
-    function FPT(domain, sp)
+    sp::SP
+    function FPT(domain, sp::SP) where {SP<:StochasticProcess}
         domain[1] >= domain[2] && throw(ArgumentError("domain[1] must be less than domain[2]"))
         if domain[1] isa Integer || domain[2] isa Integer
             domain = (Float64(domain[1]), Float64(domain[2]))
         end
-        new(domain, sp)
+        new{SP}(domain, sp)
     end
 end
 
-show(io::IO, f::FPT) = print(io, "The first passage time of $(f.sp) on the interval $(f.domain)")
+function Base.show(io::IO, f::FPT)
+    print(io, "The first passage time of $(f.sp) on the interval $(f.domain)")
+end
 
 @doc raw"""
     `^(functional::Functional, order::Int)`
 
     The callable constructor of `FunctionalPower`.
 """
-^(functional::Functional, order::Int) = FunctionalPower(functional, order)
+function Base.:^(functional::F, order::Int) where {F<:Functional}
+    FunctionalPower(functional, order)
+end
+
+function firstpassagetime(domain, method, vargs...; τ=1e-2)
+    a, b = domain
+    counter = 1
+    while true
+        t, path = method(2^counter, vargs...; τ=τ)
+        index = findfirst(path) do x
+            x <= a || x >= b
+        end
+        !isnothing(index) && return t[index]
+        counter += 1
+        counter == 60 && error("NOT PASS!")
+    end
+end
 
 @doc raw"""
     `simulate(f::FPT, τ=1e-2)`
 
     The function to simulate the first passage time.
 """
-simulate(f::FPT, τ=1e-2) = firstpassagetime(f.domain, f.sp.method, τ, args(f.sp)...)
+function simulate(f::FPT; τ=1e-2)
+    method = simulate_method(f.sp)
+    isnothing(method) && throw(ArgumentError("No simulation method for $(f.sp)"))
+    firstpassagetime(f.domain, method, args(f.sp)...; τ=τ)
+end
 
+function simulate_uncheck(f::FPT; τ=1e-2)
+    method = simulate_method(f.sp)
+    firstpassagetime(f.domain, method, args(f.sp)...; τ=τ)
+end
 
 @doc raw"""
-    `moments(functional::F, N::Int; τ=1e-2, order::Int=1) where {F<:Functional}` 
+    `moment(functional::F, N::Int; τ=1e-2, order::Int=1) where {F<:Functional}` 
 
-    The function to calculate the moments of the functional.
+    The function to calculate the moment of the functional.
 
     # Arguments
     - `functional`: The functional.
@@ -162,10 +228,12 @@ simulate(f::FPT, τ=1e-2) = firstpassagetime(f.domain, f.sp.method, τ, args(f.s
     - `τ`: The time step.
     - `order`: The order of the moment.
 """
-function moments(functional::F, N::Int; τ=1e-2, order::Int=1) where {F<:Functional}
+function moment(functional::F; N::Int=1000, τ=1e-2, order::Int=1) where {F<:Functional}
     moment = zeros(nthreads())
+    method = simulate_method(functional.sp)
+    isnothing(method) && throw(ArgumentError("No simulation method for $(functional.sp)"))
     @threads for _ in 1:N
-        x = simulate(functional, τ)
+        x = simulate_uncheck(functional; τ=τ)
         @inbounds moment[threadid()] += x^order
     end
     sum(moment) / N
@@ -176,11 +244,11 @@ end
 
     The type of occupation time functionals.
 """
-struct OccupationTime <: Functional
+struct OccupationTime{SP<:StochasticProcess} <: Functional{SP}
     T::Float64
     domain::NTuple{2,Float64}
-    sp::StochasticProcess
-    function OccupationTime(T, domain, sp)
+    sp::SP
+    function OccupationTime(T, domain, sp::SP) where {SP<:StochasticProcess}
         domain[1] >= domain[2] && throw(ArgumentError("$(domain[1]) must be less than $(domain[2])"))
         T <= 0 && throw(ArgumentError("T must be positive"))
         if T isa Integer
@@ -189,81 +257,132 @@ struct OccupationTime <: Functional
         if domain[1] isa Integer || domain[2] isa Integer
             domain = (Float64(domain[1]), Float64(domain[2]))
         end
-        new(T, domain, sp)
+        new{SP}(T, domain, sp)
     end
 end
 
-show(io::IO, ot::OccupationTime) = print(io, "$(ot.sp) 在 [0, $(ot.T)] 内逗留在 $(ot.domain) 的时间")
+function Base.show(io::IO, ot::OccupationTime)
+    print(io, "The occupation time of $(ot.sp) on the interval $(ot.domain) in the time interval [0, $(ot.T)]")
+end
+
+function occupationtime(domain, method, T, vargs...; τ=1e-2)
+    a, b = domain
+    t, x = method(T, vargs...; τ=τ)
+    indices = findall(x -> a <= x <= b, x)
+    isnothing(indices) && return 0
+    length(indices) == length(x) && return T
+    temp = diff(indices)
+    isempty(temp) && return 0
+    jump = findall(x -> x != 1, temp)
+    isnothing(jump) && return t[indices[end]] - t[indices[begin]]
+    isempty(jump) && return t[indices[end]] - t[indices[begin]]
+    start_index = 1
+    end_index = jump[1]
+    dural = t[indices[end_index]] - t[indices[start_index]]
+    @inbounds for k in firstindex(jump)+1:lastindex(jump)
+        start_index = end_index + 2
+        end_index = jump[k]
+        start_index < end_index && (dural += t[indices[end_index]] - t[indices[start_index]])
+    end
+    dural
+end
 
 @doc raw"""
-    `simulate(oc::OccupationTime, τ=1e-2)`
+    `simulate(oc::OccupationTime; τ=1e-2)`
 
     The function to simulate the occupation time.
 """
-simulate(oc::OccupationTime, τ=1e-2) = occupationtime(oc.domain, oc.sp.method, oc.T, τ, args(oc.sp)...)
+function simulate(oc::OccupationTime; τ=1e-2)
+    method = simulate_method(oc.sp)
+    isnothing(method) && throw(ArgumentError("No simulation method for $(oc.sp)"))
+    occupationtime(oc.domain, method, oc.T, args(oc.sp)...; τ=τ)
+end
 
+function simulate_uncheck(oc::OccupationTime; τ=1e-2)
+    method = simulate_method(oc.sp)
+    occupationtime(oc.domain, method, oc.T, args(oc.sp)...; τ=τ)
+end
 
-
-𝔼(traj::Trajectory; N::Int=100_000, τ=0.01) = moments(traj, N; τ=τ)
-𝔼(ptraj::PowerTrajectory; N::Int=100_000, τ=0.01) = moments(ptraj.traj, N; τ=τ, order=ptraj.order)
-𝔼(functional::F; τ=1e-2, N::Int=100_000) where {F<:Functional} = moments(functional, N; τ=τ)
-𝔼(fp::FunctionalPower; τ=1e-2, N::Int=100_000) = moments(fp.functional, N; τ=τ, order=fp.order)
+𝔼(functional::F; τ=1e-2, N::Int=1000) where {F<:Functional} = moment(functional; N=N, τ=τ)
+𝔼(fp::FunctionalPower; τ=1e-2, N::Int=1000) = moment(fp.functional; N=N, τ=τ, order=fp.order)
 
 @doc raw"""
     `TimeAverage(sp::StochasticProcess, T::Real, Δ::Real)`
 
     The type of time average functionals.
 """
-struct TimeAverage
-    sp::StochasticProcess
+struct TimeAverage{SP<:StochasticProcess}
+    sp::SP
     T::Float64
     Δ::Float64
+    function TimeAverage(sp::SP, T, Δ) where {SP<:StochasticProcess}
+        T <= 0 && throw(ArgumentError("T must be positive"))
+        Δ <= 0 && throw(ArgumentError("Δ must be positive"))
+        if T isa Integer
+            T = Float64(T)
+        end
+        if Δ isa Integer
+            Δ = Float64(Δ)
+        end
+        new{SP}(sp, T, Δ)
+    end
 end
 δ̄² = TimeAverage
 
 # x(t+Δ)*x(t)
-struct TrajMultiplication
-    sp::StochasticProcess
+struct TrajMultiplication{SP<:StochasticProcess}
+    sp::SP
     T::Float64
     Δ::Float64
 end
 
-*(xt::Trajectory{SP,T1}, xs::Trajectory{SP,T2}) where {SP,T1,T2} = TrajMultiplication(xt.sp, xs.T, xt.T - xs.T)
+Base.:*(xt::Trajectory{SP}, xs::Trajectory{SP}) where {SP} = TrajMultiplication(xt.sp, xs.T, xt.T - xs.T)
 
-function trajmulmean(tm::TrajMultiplication, τ, N)
+function trajmulmean(tm::TrajMultiplication; N::Int=1000, τ=0.01)
     T = tm.T
     Δ = tm.Δ
     slag = round(Int, Δ / τ)
     means = zeros(nthreads())
+    method = simulate_method(tm.sp)
+    isnothing(method) && throw(ArgumentError("No simulation method for $(tm.sp)"))
     @threads for _ in 1:N
-        _, x = tm.sp.method(T + Δ, τ, tm.sp.args...)
+        _, x = method(T + Δ, args(tm.sp)...; τ=τ)
         @inbounds means[threadid()] += x[end] * x[end-slag]
     end
     sum(means) / N
 end
 
-𝔼(tm::TrajMultiplication; N::Int=100_000, τ=0.01) = trajmulmean(tm, τ, N)
+𝔼(tm::TrajMultiplication; N::Int=1000, τ=0.01) = trajmulmean(tm; N=N, τ=τ)
+
+import FastGaussQuadrature: gausslegendre
+
+function get_weights_nodes(a, b, order)
+    nodes_unit, weights_unit = gausslegendre(order)
+    weights = @. (b - a) * weights_unit / 2
+    nodes = @. (b - a) * nodes_unit / 2 + (b + a) / 2
+    weights, nodes
+end
 
 """
     TAMSD(TA::TimeAverage, order::Int, τ::Float64, N::Int)
     𝔼(TA::TimeAverage; τ::Float64=1e-2, N::Int=100_000, order::Int=10)
 
-计算 Langevin 方程的时间平均均方位移 (TAMSD)
+Calculate the time average mean square displacement (TAMSD).
 
 # Arguments
-- `TA` : 时间平均， 由构造函数 `δ̄²(::StochasticProcess, T::Real, Δ::Real)` 构造
-- `τ` : 模拟 Langevin 方程时所取的欧拉格式的步长 
-- `N` : 蒙特卡罗模拟的粒子数量
-- `order` : 高斯-勒让德数值积分所取正交多项式的次数
+- `TA` : The time average, constructed by the constructor `δ̄²(::StochasticProcess, T::Real, Δ::Real)`
+- `τ` : The time step of the Euler method
+- `N` : The number of particles in the Monte Carlo simulation
+- `order` : The number of terms in the Gaussian-Legendre quadrature
 
-# 使用方法
+# Usage
 ```julia
 T = 100; Δ = 1
-x::StochasticProcess = ....  # 定义一个随机过程实例
-𝔼(δ̄²(x, T, Δ))  # 计算 TAMSD
+x::StochasticProcess = ....  # Define a stochastic process instance
+𝔼(δ̄²(x, T, Δ))  # Calculate TAMSD
 ```
 """
-function TAMSD(TA::TimeAverage, order::Int, τ::Float64, N::Int)
+function TAMSD(TA::TimeAverage; N::Int=1000, τ=0.01, order::Int=10)
     T, Δ = TA.T, TA.Δ
     x = TA.sp
     kwargs = (τ=τ, N=N)
@@ -275,4 +394,4 @@ function TAMSD(TA::TimeAverage, order::Int, τ::Float64, N::Int)
     m / (T - Δ)
 end
 
-𝔼(TA::TimeAverage; τ::Float64=1e-2, N::Int=100_000, order::Int=10) = TAMSD(TA, order, τ, N)
+𝔼(TA::TimeAverage; τ::Float64=1e-2, N::Int=1000, order::Int=10) = TAMSD(TA; τ=τ, N=N, order=order)

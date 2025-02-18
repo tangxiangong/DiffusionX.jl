@@ -1,19 +1,28 @@
 module DiffusionX
 using Random
+using Base.Threads
 
 export
+    # interfaces
     Stable,
     StochasticProcess,
     Trajectory,
     Functional,
     OccupationTime,
     TimeAverage,
-    FPT
+    FPT,
+    TAMSD,
+    simulate,
+    moment,
+    𝔼,
+    δ̄²,
+    # processes
+    Bm
 
+
+# files
 include("stable.jl")
 include("interfaces.jl")
-# include("utils.jl")
-# include("simulation/simulation.jl")
-# greet() = print("Hello World!")
+include("bm.jl")
 
 end # module DiffusionX

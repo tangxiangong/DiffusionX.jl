@@ -2,6 +2,8 @@ name = "DiffusionX"
 uuid = "430d172f-66e9-4875-89c7-99d3949cb067"
 authors = ["tangxiangong <tangxiangong@gmail.com>"]
 version = "0.1.0"
+license = "MIT"
+readme = "README.md"
 
 [deps]
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"

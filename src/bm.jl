@@ -23,9 +23,10 @@ struct Bm <: StochasticProcess
     end
 end
 
-Base.show(io::IO, bm::Bm) = print(io, "Brownian motion with initial position $($bm.xₒ) and diffusion coefficient $($bm.D)")
+Base.show(io::IO, bm::Bm) = print(io, "Brownian motion with initial position $(bm.xₒ) and diffusion coefficient $(bm.D)")
 
-function simulate_bm(T, xₒ, D; τ::Float64=0.01)
+function simulate(bm::Bm, T::Union{Int,Float64}; τ::Float64=0.01)
+    x₀, D = bm.xₒ, bm.D
     n = ceil(Int, T / τ)
     x = zeros(Float64, n + 1)
     t = zeros(Float64, n + 1)
@@ -37,6 +38,3 @@ function simulate_bm(T, xₒ, D; τ::Float64=0.01)
     end
     t, x
 end
-
-args(bm::Bm) = (bm.xₒ, bm.D)
-simulate_method(bm::Bm) = simulate_bm

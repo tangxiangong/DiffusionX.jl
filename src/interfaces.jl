@@ -49,7 +49,11 @@ function (sp::StochasticProcess)(T)
     Trajectory(sp, T)
 end
 
-simulate_method(sp::SP) where {SP<:StochasticProcess} = nothing
+simulate(sp::SP, T::Union{Int,Float64}; τ::Float64=0.01) where {SP<:StochasticProcess} = nothing
+
+function is_implemented(sp::SP) where {SP<:StochasticProcess}
+    hasmethod(simulate, Tuple{SP,Union{Int,Float64}}, (:τ,))
+end
 
 @doc raw"""
     `simulate(traj::Trajectory, τ=1e-2)`
@@ -63,9 +67,8 @@ simulate_method(sp::SP) where {SP<:StochasticProcess} = nothing
     - `τ`: The time step.
 """
 function simulate(traj::Trajectory, τ=1e-2)
-    method = simulate_method(traj.sp)
-    isnothing(method) && throw(ArgumentError("No simulation method for $(traj.sp)"))
-    method(traj.T, args(traj.sp)...; τ=τ)
+    is_implemented(traj.sp) || throw(ArgumentError("No simulation method for $(traj.sp)"))
+    simulate(traj.sp, traj.T; τ=τ)
 end
 
 @doc raw"""
@@ -116,12 +119,11 @@ end
 """
 function moment(traj::Trajectory; N::Int=1000, τ=0.01, order::Int=1)
     moment = zeros(nthreads())
-    method = simulate_method(traj.sp)
-    isnothing(method) && throw(ArgumentError("No simulation method for $(traj.sp)"))
+    is_implemented(traj.sp) || throw(ArgumentError("No simulation method for $(traj.sp)"))
     T = traj.T
-    vargs = args(traj.sp)
+    sp = traj.sp
     @threads for _ in 1:N
-        __, x = method(T, vargs...; τ=τ)
+        __, x = simulate(sp, T; τ=τ)
         @inbounds moment[threadid()] += x[end]^order
     end
     sum(moment) / N
@@ -162,14 +164,16 @@ moment(fp::FunctionalPower; N::Int=1_000, τ=0.01) = moment(fp.functional; N=N, 
 
     The type of first passage time functionals.
 """
-struct FPT{SP<:StochasticProcess} <: Functional{SP}
+Base.@kwdef struct FPT{SP<:StochasticProcess} <: Functional{SP}
     domain::NTuple{2,Float64}
     sp::SP
+    max_duration::Int = 100
     function FPT(domain, sp::SP) where {SP<:StochasticProcess}
         domain[1] >= domain[2] && throw(ArgumentError("domain[1] must be less than domain[2]"))
         if domain[1] isa Integer || domain[2] isa Integer
             domain = (Float64(domain[1]), Float64(domain[2]))
         end
+        is_implemented(sp) || throw(ArgumentError("No simulation method for $(sp)"))
         new{SP}(domain, sp)
     end
 end
@@ -187,34 +191,28 @@ function Base.:^(functional::F, order::Int) where {F<:Functional}
     FunctionalPower(functional, order)
 end
 
-function firstpassagetime(domain, method, vargs...; τ=1e-2)
-    a, b = domain
-    counter = 1
+function simulate(fpt::FPT; τ=1e-2)
+    sp = fpt.sp
+    a, b = fpt.domain
+    duration = 10
+    max_duration = fpt.max_duration
     while true
-        t, path = method(2^counter, vargs...; τ=τ)
+        t, path = simulate(sp, duration; τ=τ)
         index = findfirst(path) do x
             x <= a || x >= b
         end
         !isnothing(index) && return t[index]
-        counter += 1
-        counter == 60 && error("NOT PASS!")
+        duration *= 2
+        if duration > max_duration
+            t, path = simulate(sp, max_duration; τ=τ)
+            index = findfirst(path) do x
+                x <= a || x >= b
+            end
+            !isnothing(index) && return t[index]
+            @warn "NOT PASS! during $duration"
+            return nothing
+        end
     end
-end
-
-@doc raw"""
-    `simulate(f::FPT, τ=1e-2)`
-
-    The function to simulate the first passage time.
-"""
-function simulate(f::FPT; τ=1e-2)
-    method = simulate_method(f.sp)
-    isnothing(method) && throw(ArgumentError("No simulation method for $(f.sp)"))
-    firstpassagetime(f.domain, method, args(f.sp)...; τ=τ)
-end
-
-function simulate_uncheck(f::FPT; τ=1e-2)
-    method = simulate_method(f.sp)
-    firstpassagetime(f.domain, method, args(f.sp)...; τ=τ)
 end
 
 @doc raw"""
@@ -230,10 +228,9 @@ end
 """
 function moment(functional::F; N::Int=1000, τ=1e-2, order::Int=1) where {F<:Functional}
     moment = zeros(nthreads())
-    method = simulate_method(functional.sp)
-    isnothing(method) && throw(ArgumentError("No simulation method for $(functional.sp)"))
+    is_implemented(functional.sp) || throw(ArgumentError("No simulation method for $(functional.sp)"))
     @threads for _ in 1:N
-        x = simulate_uncheck(functional; τ=τ)
+        x = simulate(functional; τ=τ)
         @inbounds moment[threadid()] += x^order
     end
     sum(moment) / N
@@ -251,6 +248,7 @@ struct OccupationTime{SP<:StochasticProcess} <: Functional{SP}
     function OccupationTime(T, domain, sp::SP) where {SP<:StochasticProcess}
         domain[1] >= domain[2] && throw(ArgumentError("$(domain[1]) must be less than $(domain[2])"))
         T <= 0 && throw(ArgumentError("T must be positive"))
+        is_implemented(sp) || throw(ArgumentError("No simulation method for $(sp)"))
         if T isa Integer
             T = Float64(T)
         end
@@ -265,12 +263,13 @@ function Base.show(io::IO, ot::OccupationTime)
     print(io, "The occupation time of $(ot.sp) on the interval $(ot.domain) in the time interval [0, $(ot.T)]")
 end
 
-function occupationtime(domain, method, T, vargs...; τ=1e-2)
-    a, b = domain
-    t, x = method(T, vargs...; τ=τ)
+function simulate(ot::OccupationTime; τ=1e-2)
+    sp = ot.sp
+    a, b = ot.domain
+    t, x = simulate(sp, ot.T; τ=τ)
     indices = findall(x -> a <= x <= b, x)
     isnothing(indices) && return 0
-    length(indices) == length(x) && return T
+    length(indices) == length(x) && return ot.T
     temp = diff(indices)
     isempty(temp) && return 0
     jump = findall(x -> x != 1, temp)
@@ -287,24 +286,8 @@ function occupationtime(domain, method, T, vargs...; τ=1e-2)
     dural
 end
 
-@doc raw"""
-    `simulate(oc::OccupationTime; τ=1e-2)`
-
-    The function to simulate the occupation time.
-"""
-function simulate(oc::OccupationTime; τ=1e-2)
-    method = simulate_method(oc.sp)
-    isnothing(method) && throw(ArgumentError("No simulation method for $(oc.sp)"))
-    occupationtime(oc.domain, method, oc.T, args(oc.sp)...; τ=τ)
-end
-
-function simulate_uncheck(oc::OccupationTime; τ=1e-2)
-    method = simulate_method(oc.sp)
-    occupationtime(oc.domain, method, oc.T, args(oc.sp)...; τ=τ)
-end
-
 𝔼(functional::F; τ=1e-2, N::Int=1000) where {F<:Functional} = moment(functional; N=N, τ=τ)
-𝔼(fp::FunctionalPower; τ=1e-2, N::Int=1000) = moment(fp.functional; N=N, τ=τ, order=fp.order)
+
 
 @doc raw"""
     `TimeAverage(sp::StochasticProcess, T::Real, Δ::Real)`
@@ -318,6 +301,7 @@ struct TimeAverage{SP<:StochasticProcess}
     function TimeAverage(sp::SP, T, Δ) where {SP<:StochasticProcess}
         T <= 0 && throw(ArgumentError("T must be positive"))
         Δ <= 0 && throw(ArgumentError("Δ must be positive"))
+        is_implemented(sp) || throw(ArgumentError("No simulation method for $(sp)"))
         if T isa Integer
             T = Float64(T)
         end
@@ -343,10 +327,9 @@ function trajmulmean(tm::TrajMultiplication; N::Int=1000, τ=0.01)
     Δ = tm.Δ
     slag = round(Int, Δ / τ)
     means = zeros(nthreads())
-    method = simulate_method(tm.sp)
-    isnothing(method) && throw(ArgumentError("No simulation method for $(tm.sp)"))
+    is_implemented(tm.sp) || throw(ArgumentError("No simulation method for $(tm.sp)"))
     @threads for _ in 1:N
-        _, x = method(T + Δ, args(tm.sp)...; τ=τ)
+        _, x = simulate(tm.sp, T + Δ; τ=τ)
         @inbounds means[threadid()] += x[end] * x[end-slag]
     end
     sum(means) / N
